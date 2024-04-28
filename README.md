@@ -40,6 +40,9 @@
 12. Multi-Stage Docker build for faster builds
 13. Versioning using git commit
 
+## What it is not ?
+- This is no way a complete solution for all your needs. This is just a boilerplate to start with.
+- This is no way a starting point for a ecommerce application. What I provided is a simple CRUD API.
 
 ### QuickStart
 
@@ -72,6 +75,7 @@ Other Options:
       docker-clean-service-images   Stops and Removes the service images
       docker-clean-build-images     Removes build images
       owasp-report                  Generate OWASP report
+      go-work                       Generate the go work file
 
 ### Tools
 
