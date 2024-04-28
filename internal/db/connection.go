@@ -3,26 +3,28 @@ package db
 import (
 	"context"
 	"errors"
-	"sync"
 	"time"
 
+	"github.com/rameshsunkara/go-rest-api-example/internal/logger"
+	"go.mongodb.org/mongo-driver/event"
 	"go.mongodb.org/mongo-driver/mongo/readpref"
 
-	"github.com/rs/zerolog/log"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 )
 
 var (
-	InvalidConnUrlErr = errors.New("failed to connect to DB, as the connection string is invalid")
-	ClientCreationErr = errors.New("failed to create new client to connect with db")
-	ClientInitErr     = errors.New("failed to initialize db client")
-	ConnectionLeak    = errors.New("unable to disconnect from db, potential connection leak")
-	connectOnce       sync.Once
+	ErrInvalidConnURL      = errors.New("failed to connect to DB, as the connection string is invalid")
+	ErrConnectionEstablish = errors.New("failed to establish connection to DB")
+	ErrClientInit          = errors.New("failed to initialize DB client")
+	ErrConnectionLeak      = errors.New("unable to disconnect from DB, potential connection leak")
+	ErrPingDB              = errors.New("failed to ping DB")
 )
 
-// ConnectionTimeOut - Max time to establish DB connection // TODO: Move to config
-const ConnectionTimeOut = 10 * time.Second
+const (
+	DefConnectionTimeOut = 10 * time.Second
+	DefDatabase          = "ecommerce"
+)
 
 type MongoDatabase interface {
 	Collection(name string, opts ...*options.CollectionOptions) *mongo.Collection
@@ -34,80 +36,108 @@ type MongoManager interface {
 	Disconnect() error
 }
 
-// connectionManager - Implements MongoManager
-type connectionManager struct {
-	client   *mongo.Client
-	database *mongo.Database
+type ConnectionOpts struct {
+	ConnectionTimeout time.Duration
+	PrintQueries      bool
+	Database          string
 }
 
-// NewMongoManager - Initializes DB connection and returns a Manager object which can be used to perform DB operations
-func NewMongoManager(dbName string, connUrl string) (MongoManager, error) {
-	log.Debug().Str("DB Connection Url", connUrl)
+// ConnectionManager - Manages the connection to the underlying database.
+type ConnectionManager struct {
+	connectionURL string
+	client        *mongo.Client
+	database      *mongo.Database
+	credentials   *MongoDBCredentials
+	logger        *logger.AppLogger
+}
 
-	dbMgr := &connectionManager{}
-	var connErr error
-	connectOnce.Do(func() {
-		if c, err := newClient(connUrl); err != nil {
-			connErr = err
-		} else {
-			db := c.Database(dbName)
-			dbMgr.database = db
-			dbMgr.client = c
-
-			// Verify connection
-			if err := dbMgr.Ping(); err != nil {
-				connErr = err
-			}
+// NewMongoManager - Initializes DB connection and returns a Manager object which can be used to perform DB operations.
+func NewMongoManager(mc *MongoDBCredentials, opts *ConnectionOpts, lgr *logger.AppLogger) (*ConnectionManager, error) {
+	connURL := MongoConnectionURL(mc)
+	lgr.Info().Str("connURL", MaskedMongoConnectionURL(mc)).Msg("connecting to DB")
+	if len(connURL) == 0 {
+		return nil, ErrInvalidConnURL
+	}
+	connMgr := &ConnectionManager{
+		credentials:   mc,
+		logger:        lgr,
+		connectionURL: connURL,
+	}
+	connOpts := FillConnectionOpts(opts)
+	var err error
+	var c *mongo.Client
+	if c, err = connMgr.newClient(connOpts); err == nil {
+		db := c.Database(connOpts.Database)
+		connMgr.database = db
+		connMgr.client = c
+		// Verify connection
+		if pErr := connMgr.Ping(); pErr != nil {
+			return nil, ErrConnectionEstablish
 		}
-	})
-
-	return dbMgr, connErr
+		return connMgr, nil
+	}
+	return nil, err
 }
 
-// newClient - creates a new Mongo Client to connect to the specified url and initializes the Client
-func newClient(connectionUrl string) (*mongo.Client, error) {
-	if len(connectionUrl) == 0 {
-		return nil, InvalidConnUrlErr
+func FillConnectionOpts(opts *ConnectionOpts) *ConnectionOpts {
+	if opts == nil {
+		return &ConnectionOpts{
+			PrintQueries:      false,
+			ConnectionTimeout: DefConnectionTimeOut,
+			Database:          DefDatabase,
+		}
 	}
-	clientOptions := options.Client().ApplyURI(connectionUrl)
-	client, err := mongo.NewClient(clientOptions)
-	if err != nil {
-		log.Error().Err(err).Msg("Connection Failed to Database")
-		return nil, ClientCreationErr
+	if opts.ConnectionTimeout == 0 {
+		opts.ConnectionTimeout = DefConnectionTimeOut
 	}
+	if opts.Database == "" {
+		opts.Database = DefDatabase
+	}
+	return opts
+}
 
-	ctx, cancel := context.WithTimeout(context.Background(), ConnectionTimeOut)
+// newClient - creates a new Mongo Client to connect DB.
+func (c *ConnectionManager) newClient(connOpts *ConnectionOpts) (*mongo.Client, error) {
+	var cmdMonitor *event.CommandMonitor
+	if connOpts.PrintQueries {
+		cmdMonitor = &event.CommandMonitor{
+			Started: func(_ context.Context, evt *event.CommandStartedEvent) {
+				c.logger.Info().Str("dbQuery", evt.Command.String()).Send()
+			},
+		}
+	}
+	clientOptions := options.Client().ApplyURI(c.connectionURL).SetMonitor(cmdMonitor)
+	ctx, cancel := context.WithTimeout(context.Background(), connOpts.ConnectionTimeout)
 	defer cancel()
-	connErr := client.Connect(ctx)
-	if connErr != nil {
-		log.Error().Err(connErr).Msg("Connection Failed to Database")
-		return nil, ClientInitErr
+	client, err := mongo.Connect(ctx, clientOptions)
+	if err != nil {
+		c.logger.Error().Err(err).Msg("failed to create new client")
+		return nil, ErrClientInit
 	}
 
 	return client, nil
 }
 
-// Database - Returns configured database instance
-func (c *connectionManager) Database() MongoDatabase {
+// Database - Returns configured database instance.
+func (c *ConnectionManager) Database() MongoDatabase {
 	return c.database
 }
 
-// Ping - Validates application's connectivity to the underlying database by pinging
-func (c *connectionManager) Ping() error {
+// Ping - Validates application's connectivity to the underlying database by pinging.
+func (c *ConnectionManager) Ping() error {
 	if err := c.client.Ping(context.TODO(), readpref.Primary()); err != nil {
-		log.Error().Err(err).Msg("unable to connect to DB")
-		return err
+		c.logger.Error().Err(err).Msg("failed to ping DB")
+		return ErrPingDB
 	}
 	return nil
 }
 
-// Disconnect - Close connection to Database
-func (c *connectionManager) Disconnect() error {
-	log.Info().Msg("Disconnecting from Database")
+// Disconnect - Close connection to Database.
+func (c *ConnectionManager) Disconnect() error {
 	if err := c.client.Disconnect(context.Background()); err != nil {
-		log.Error().Err(err).Msg("unable to disconnect from DB")
-		return ConnectionLeak
+		c.logger.Error().Err(err).Msg("failed to disconnect from DB")
+		return ErrConnectionLeak
 	}
-	log.Info().Msg("Successfully disconnected from DB")
+	c.logger.Info().Msg("successfully disconnected from DB")
 	return nil
 }

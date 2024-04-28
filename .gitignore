@@ -32,6 +32,7 @@ coverage.txt
 
 # Go workspace file
 go.work
+go.work.sum
 
 ### Go Patch ###
 /vendor/
@@ -405,7 +406,7 @@ FakesAssemblies/
 .ntvs_analysis.dat
 node_modules/
 
-# Visual Studio 6 build log
+# Visual Studio 6 build logger
 *.plg
 
 # Visual Studio 6 workspace options file
@@ -478,6 +479,9 @@ MigrationBackup/
 
 # Ionide (cross platform F# VS Code tools) working folder
 .ionide/
+
+# OWAS Report
+report.html
 
 # End of https://www.toptal.com/developers/gitignore/api/go,intellij+iml,vs
 /.idea/sonarlint/

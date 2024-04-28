@@ -1,76 +1,90 @@
 package server
 
 import (
-	"github.com/gin-contrib/pprof"
-	"github.com/gin-gonic/gin"
-	"github.com/rameshsunkara/go-rest-api-example/internal/controllers"
-	"github.com/rameshsunkara/go-rest-api-example/internal/db"
-	"github.com/rameshsunkara/go-rest-api-example/pkg/util"
-	swaggerFiles "github.com/swaggo/files"
-	ginSwagger "github.com/swaggo/gin-swagger"
+	"io"
 	"sync"
 
-	"github.com/rameshsunkara/go-rest-api-example/internal/config"
+	"github.com/gin-contrib/gzip"
+	"github.com/rameshsunkara/go-rest-api-example/internal/logger"
+
+	"github.com/gin-contrib/pprof"
+	"github.com/gin-gonic/gin"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"github.com/rameshsunkara/go-rest-api-example/internal/db"
+	"github.com/rameshsunkara/go-rest-api-example/internal/handlers"
+	"github.com/rameshsunkara/go-rest-api-example/internal/middleware"
 	"github.com/rameshsunkara/go-rest-api-example/internal/models"
+	"github.com/rameshsunkara/go-rest-api-example/internal/util"
 )
 
-var runOnce sync.Once
+var startOnce sync.Once
 
-func Init(serviceInfo *models.ServiceInfo, manager db.MongoManager) {
-	config := config.GetConfig()
-	port := config.GetString("server.port")
-	runOnce.Do(func() {
-		r := WebRouter(serviceInfo, manager)
-		r.Run(":" + port)
+func StartService(svcEnv models.ServiceEnv, dbMgr db.MongoManager, lgr *logger.AppLogger) {
+	startOnce.Do(func() {
+		r := WebRouter(svcEnv, dbMgr, lgr)
+		err := r.Run(":" + svcEnv.Port)
+		if err != nil {
+			panic(err)
+		}
 	})
 }
 
-func WebRouter(svcInfo *models.ServiceInfo, dbMgr db.MongoManager) (router *gin.Engine) {
+func WebRouter(svcEnv models.ServiceEnv, dbMgr db.MongoManager, lgr *logger.AppLogger) *gin.Engine {
 	ginMode := gin.ReleaseMode
-	if util.IsDevMode(svcInfo.Environment) {
+	if util.IsDevMode(svcEnv.Name) {
 		ginMode = gin.DebugMode
 		gin.ForceConsoleColor()
 	}
 	gin.SetMode(ginMode)
+	gin.EnableJsonDecoderDisallowUnknownFields()
 
 	// Middleware
-	router = gin.Default()
-	pprof.Register(router) // TODO: Add debug routes only for Admins /debug/*
-	// TODO: Enforce there is authorization information with applicable requests
-	// TODO: log everything from gin in json
+	gin.DefaultWriter = io.Discard
+	router := gin.Default()
+	router.Use(gzip.Gzip(gzip.DefaultCompression))
+	router.Use(middleware.ReqIDMiddleware())
+	router.Use(middleware.ResponseHeadersMiddleware())
+	router.Use(middleware.RequestLogMiddleware(lgr))
+	router.Use(gin.Recovery())
 
-	// Routes
-
-	// Routes - Status Check
-	status := controllers.NewStatusController(svcInfo, dbMgr)
+	internalAPIGrp := router.Group("/internal")
+	internalAPIGrp.Use(middleware.AuthMiddleware())
+	pprof.RouteRegister(internalAPIGrp, "pprof")
+	router.GET("/metrics", gin.WrapH(promhttp.Handler())) // /metrics
+	status := handlers.NewStatusController(dbMgr)
 	router.GET("/status", status.CheckStatus) // /status
 
-	// Dependencies for controllers
+	// Dependencies for handlers
 	d := dbMgr.Database()
-	orders := db.NewOrderDataService(d)
+	orders := db.NewOrdersRepo(d, lgr)
 
-	// Routes - Seed DB
-	if util.IsDevMode(svcInfo.Environment) {
-		seed := controllers.NewSeedController(orders)
-		router.POST("/seedDB", seed.SeedDB) // /seedDB
+	// This is a dev mode only route to seed the local db
+	if util.IsDevMode(svcEnv.Name) {
+		seed := handlers.NewDataSeedHandler(orders)
+		internalAPIGrp.POST("/seed-local-db", seed.SeedDB) // /seedDB
 	}
 
-	// Routes - Orders
-	v1 := router.Group("/api/v1")
+	// Routes - Ecommerce
+	externalAPIGrp := router.Group("/ecommerce/v1")
+	externalAPIGrp.Use(middleware.AuthMiddleware())
+	externalAPIGrp.Use(middleware.QueryParamsCheckMiddleware(lgr))
 	{
-		ordersGroup := v1.Group("orders")
+		ordersGroup := externalAPIGrp.Group("orders")
 		{
-			orders := controllers.NewOrdersController(orders)
-			ordersGroup.GET("", orders.GetAll)            // api/v1/orders
-			ordersGroup.GET("/:id", orders.GetById)       // api/v1/orders/:id
-			ordersGroup.POST("", orders.Post)             // api/v1/orders
-			ordersGroup.PUT("", orders.Post)              // api/v1/orders
-			ordersGroup.DELETE("/:id", orders.DeleteById) // api/v1/orders/:id
+			orders := handlers.NewOrdersHandler(orders, lgr)
+			ordersGroup.GET("", orders.GetAll)
+			ordersGroup.GET("/:id", orders.GetByID)
+			ordersGroup.POST("", orders.Create)
+			ordersGroup.DELETE("/:id", orders.DeleteByID)
 		}
 	}
 
-	// Routes - Swagger
-	router.GET("/swagger/*any", ginSwagger.WrapHandler(swaggerFiles.Handler))
-
-	return
+	lgr.Info().Msg("Registered routes")
+	for _, item := range router.Routes() {
+		lgr.Info().
+			Str("method", item.Method).
+			Str("path", item.Path).
+			Send()
+	}
+	return router
 }

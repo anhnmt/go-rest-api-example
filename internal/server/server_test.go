@@ -3,26 +3,22 @@ package server_test
 import (
 	"net/http"
 	"testing"
-	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/rameshsunkara/go-rest-api-example/internal/mocks"
+	"github.com/rameshsunkara/go-rest-api-example/internal/db/mocks"
+	"github.com/rameshsunkara/go-rest-api-example/internal/logger"
 	"github.com/rameshsunkara/go-rest-api-example/internal/models"
 	"github.com/rameshsunkara/go-rest-api-example/internal/server"
 	"github.com/stretchr/testify/assert"
 )
 
-var (
-	svcInfo = &models.ServiceInfo{
-		Name:        "test-api-service",
-		Version:     "rams-fav",
-		UpTime:      time.Now(),
-		Environment: "test",
-	}
-)
-
 func TestListOfRoutes(t *testing.T) {
-	router := server.WebRouter(svcInfo, &mocks.MockMongoMgr{})
+	svcInfo := models.ServiceEnv{
+		Name: "test",
+		Port: "8080",
+	}
+	lgr := logger.Setup(models.ServiceEnv{Name: "test"})
+	router := server.WebRouter(svcInfo, &mocks.MockMongoMgr{}, lgr)
 	list := router.Routes()
 	mode := gin.Mode()
 
@@ -40,34 +36,32 @@ func TestListOfRoutes(t *testing.T) {
 
 	assertRoutePresent(t, list, gin.RouteInfo{
 		Method: http.MethodGet,
-		Path:   "/api/v1/orders",
+		Path:   "/ecommerce/v1/orders",
 	})
 
 	assertRoutePresent(t, list, gin.RouteInfo{
 		Method: http.MethodGet,
-		Path:   "/api/v1/orders/:id",
+		Path:   "/ecommerce/v1/orders/:id",
 	})
 
 	assertRoutePresent(t, list, gin.RouteInfo{
 		Method: http.MethodPost,
-		Path:   "/api/v1/orders",
-	})
-
-	assertRoutePresent(t, list, gin.RouteInfo{
-		Method: http.MethodPut,
-		Path:   "/api/v1/orders",
+		Path:   "/ecommerce/v1/orders",
 	})
 
 	assertRoutePresent(t, list, gin.RouteInfo{
 		Method: http.MethodDelete,
-		Path:   "/api/v1/orders/:id",
+		Path:   "/ecommerce/v1/orders/:id",
 	})
-
 }
 
 func TestModeSpecificRoutes(t *testing.T) {
-	svcInfo.Environment = "dev"
-	router := server.WebRouter(svcInfo, &mocks.MockMongoMgr{})
+	svcInfo := models.ServiceEnv{
+		Name: "dev",
+		Port: "8080",
+	}
+	lgr := logger.Setup(models.ServiceEnv{Name: "test"})
+	router := server.WebRouter(svcInfo, &mocks.MockMongoMgr{}, lgr)
 	list := router.Routes()
 	mode := gin.Mode()
 
@@ -75,7 +69,7 @@ func TestModeSpecificRoutes(t *testing.T) {
 
 	assertRoutePresent(t, list, gin.RouteInfo{
 		Method: http.MethodPost,
-		Path:   "/seedDB",
+		Path:   "/internal/seed-local-db",
 	})
 }
 

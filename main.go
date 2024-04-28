@@ -2,91 +2,118 @@ package main
 
 import (
 	"os"
+	"strconv"
 	"time"
 
 	"github.com/rameshsunkara/deferrun"
-	"github.com/rameshsunkara/go-rest-api-example/internal/server"
-	"github.com/rameshsunkara/go-rest-api-example/pkg/util"
-	"github.com/rs/zerolog"
-	"github.com/rs/zerolog/pkgerrors"
-
-	_ "github.com/rameshsunkara/go-rest-api-example/docs"
-	"github.com/rameshsunkara/go-rest-api-example/internal/config"
 	"github.com/rameshsunkara/go-rest-api-example/internal/db"
+	"github.com/rameshsunkara/go-rest-api-example/internal/logger"
 	"github.com/rameshsunkara/go-rest-api-example/internal/models"
-	"github.com/rs/zerolog/log"
+	"github.com/rameshsunkara/go-rest-api-example/internal/server"
 )
 
 const (
-	ServiceName = "ecommerce-orders"
-	DBName      = "ecommerce"
+	serviceName = "ecommerce-orders"
+	defaultPort = "8080"
 )
 
-// Passed while building from  make file
+// Passed while building from  make file.
 var version string
 
-// @title           GO Rest Example API Service (Purchase Order Tracker)
-// @version         1.0
-// @description     A sample service to demonstrate how to develop REST API in golang
-
-// @contact.name    Ramesh Sunkara
-// @contact.url
-// @contact.email
-
-// @host      localhost:8080
-// @BasePath  /api/v1
 func main() {
-	upTime := time.Now()
-	t := deferrun.NewSignalHandler()
+	upTime := time.Now().UTC().Format(time.RFC3339)
+	sigHandler := deferrun.NewSignalHandler()
 
-	env := os.Getenv("environment")
-	if env == "" {
-		env = "dev"
+	// setup : read environmental configurations
+	svcEnv := MustEnvConfig()
+
+	// setup : service logger
+	logger := logger.Setup(svcEnv)
+
+	// setup : database connection
+	dbCredentials, err := db.MongoDBCredentialFromSideCar(svcEnv.MongoVaultSideCar)
+	if err != nil {
+		logger.Fatal().Err(err).Msg("failed to fetch DB credentials")
 	}
-
-	// Metadata of the service
-	serviceInfo := &models.ServiceInfo{
-		Name:        ServiceName,
-		UpTime:      upTime,
-		Environment: env,
-		Version:     version,
+	connOpts := &db.ConnectionOpts{
+		Database:     svcEnv.DBName,
+		PrintQueries: svcEnv.PrintQueries,
 	}
-
-	// Setup : Log
-	setupLog(env)
-
-	log.Info().Object("Service", serviceInfo).Msg("starting")
-
-	// Load Configuration
-	c, cErr := config.LoadConfig(env)
-	if cErr != nil {
-		log.Fatal().Err(cErr).Msg("unable to read configuration")
+	dbConnMgr, err := db.NewMongoManager(dbCredentials, connOpts, logger)
+	if err != nil {
+		logger.Fatal().Err(err).Msg("unable to initialize DB connection")
 	}
-
-	// Setup : DB
-	dbManager, dErr := db.NewMongoManager(DBName, c.GetString("db.dsn"))
-	if dErr != nil {
-		log.Fatal().Err(dErr).Msg("unable to initialize DB connection")
-	}
-	t.OnSignal(func() {
-		dbManager.Disconnect()
+	sigHandler.OnSignal(func() {
+		dErr := dbConnMgr.Disconnect()
+		if dErr != nil {
+			logger.Error().Err(dErr).Msg("unable to disconnect from DB, potential connection leak")
+			return
+		}
 	})
 
-	// Setup : Server
-	server.Init(serviceInfo, dbManager)
+	logger.Info().
+		Str("name", serviceName).
+		Str("environment", svcEnv.Name).
+		Str("started", upTime).
+		Str("version", version).
+		Msg("service details, starting the service")
 
-	log.Fatal().Str("ServiceName", ServiceName).Msg("Server Exited")
+	// setup : start service
+	server.StartService(svcEnv, dbConnMgr, logger)
+
+	logger.Fatal().Msg("service stopped")
 }
 
-func setupLog(env string) {
-	zerolog.ErrorStackMarshaler = pkgerrors.MarshalStack
-	lvl := zerolog.InfoLevel
-	logDest := os.Stdout
-	logger := zerolog.New(logDest).With().Caller().Timestamp().Logger()
-	if util.IsDevMode(env) {
-		lvl = zerolog.TraceLevel
-		logger = zerolog.New(zerolog.ConsoleWriter{Out: logDest}).With().Caller().Timestamp().Logger()
+// MustEnvConfig reads all the environmental configurations and panics if something critical is missing.
+func MustEnvConfig() models.ServiceEnv {
+	envName := os.Getenv("environment")
+	if envName == "" {
+		envName = "local"
 	}
-	zerolog.SetGlobalLevel(lvl)
-	log.Logger = logger
+
+	port := os.Getenv("port")
+	if port == "" {
+		port = defaultPort
+	}
+
+	dbName := os.Getenv("dbName")
+	if dbName == "" {
+		panic("dbName should be defined in env configuration")
+	}
+
+	// printDBQueries is optional, default is false, when set to true, it will print all the queries to the console.
+	printDBQueries, err := strconv.ParseBool(os.Getenv("printDBQueries"))
+	if err != nil {
+		printDBQueries = false
+	}
+
+	mongoSideCar := os.Getenv("MongoVaultSideCar")
+	if mongoSideCar == "" {
+		panic("mongo sidecar file path should be defined in env configuration")
+	}
+
+	// disableAuth is optional, default is false, when set to true, it will disable authentication.
+	// Added for development purpose, do not use in production.
+	disableAuth, authEnvErr := strconv.ParseBool(os.Getenv("disableAuth"))
+	if authEnvErr != nil {
+		// do not disable authentication by default, added this flexibility just for local development purpose
+		disableAuth = false
+	}
+
+	logLevel := os.Getenv("logLevel")
+	if logLevel == "" {
+		logLevel = "info"
+	}
+
+	envConfigurations := models.ServiceEnv{
+		Name:              envName,
+		Port:              port,
+		PrintQueries:      printDBQueries,
+		MongoVaultSideCar: mongoSideCar,
+		DisableAuth:       disableAuth,
+		DBName:            dbName,
+		LogLevel:          logLevel,
+	}
+
+	return envConfigurations
 }
